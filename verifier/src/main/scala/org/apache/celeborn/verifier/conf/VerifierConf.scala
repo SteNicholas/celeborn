@@ -99,18 +99,18 @@ object VerifierConf {
   def stopMasterScript(conf: VerifierConf): String = {
     conf.get(
       "verf.scripts.master.stop.script",
-      s"$defaultScriptsLocation${File.separator}start-master.sh")
+      s"$defaultScriptsLocation${File.separator}stop-master.sh")
   }
 
   def startWorkerScript(conf: VerifierConf): String = {
     conf.get(
       "verf.scripts.worker.start.script",
-      s"$defaultScriptsLocation${File.separator}start-master.sh")
+      s"$defaultScriptsLocation${File.separator}start-worker.sh")
   }
 
   def stopWorkerScript(conf: VerifierConf): String = {
     conf.get(
       "verf.scripts.worker.stop.script",
-      s"$defaultScriptsLocation${File.separator}start-master.sh")
+      s"$defaultScriptsLocation${File.separator}stop-worker.sh")
   }
 }
