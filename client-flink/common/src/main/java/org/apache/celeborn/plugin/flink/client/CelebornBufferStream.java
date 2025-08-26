@@ -19,6 +19,8 @@ package org.apache.celeborn.plugin.flink.client;
 
 import java.io.IOException;
 import java.nio.ByteBuffer;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ExecutorService;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.BiConsumer;
 import java.util.function.Consumer;
@@ -44,6 +46,7 @@ import org.apache.celeborn.common.protocol.PbOpenStream;
 import org.apache.celeborn.common.protocol.PbReadAddCredit;
 import org.apache.celeborn.common.protocol.PbStreamHandler;
 import org.apache.celeborn.common.protocol.StreamType;
+import org.apache.celeborn.common.util.ThreadUtils;
 import org.apache.celeborn.plugin.flink.network.FlinkTransportClientFactory;
 
 public class CelebornBufferStream {
@@ -64,6 +67,7 @@ public class CelebornBufferStream {
   private Supplier<ByteBuf> bufferSupplier;
   private int initialCredit;
   private Consumer<RequestMessage> messageConsumer;
+  private ExecutorService executorService;
 
   public CelebornBufferStream() {}
 
@@ -82,6 +86,7 @@ public class CelebornBufferStream {
     this.subIndexStart = subIndexStart;
     this.subIndexEnd = subIndexEnd;
     this.pushDataTimeoutMs = pushDataTimeoutMs;
+    this.executorService = ThreadUtils.newDaemonSingleThreadExecutor("client-buffer-stream-opener");
   }
 
   public void open(
@@ -205,6 +210,9 @@ public class CelebornBufferStream {
   public void close() {
     synchronized (lock) {
       cleanupStream(streamId);
+      if (executorService != null) {
+        executorService.shutdownNow();
+      }
       isClosed = true;
     }
   }
@@ -214,7 +222,7 @@ public class CelebornBufferStream {
       @Nullable BiConsumer<Long, Integer> requiredSegmentIdConsumer,
       boolean sync) {
     logger.debug(
-        "MoveToNextPartitionIfPossible in this:{},  endedStreamId: {}, currentLocationIndex: {}, currentSteamId:{}, locationsLength:{}",
+        "MoveToNextPartitionIfPossible in this: {},  endedStreamId: {}, currentLocationIndex: {}, currentSteamId: {}, locationsLength: {}.",
         this,
         endedStreamId,
         currentLocationIndex.get(),
@@ -226,18 +234,45 @@ public class CelebornBufferStream {
     }
 
     if (currentLocationIndex.get() < locations.length) {
-      try {
-        openStreamInternal(requiredSegmentIdConsumer, sync);
-        logger.debug(
-            "MoveToNextPartitionIfPossible after openStream this:{},  endedStreamId: {}, currentLocationIndex: {}, currentSteamId:{}, locationsLength:{}",
-            this,
-            endedStreamId,
-            currentLocationIndex.get(),
-            streamId,
-            locations.length);
-      } catch (Exception e) {
-        logger.warn("Failed to open stream and report to flink framework. ", e);
-        messageConsumer.accept(new TransportableError(0L, e));
+      if (sync) {
+        try {
+          openStreamInternal(requiredSegmentIdConsumer, true);
+          logger.debug(
+              "MoveToNextPartitionIfPossible after openStream this: {},  endedStreamId: {}, currentLocationIndex: {}, currentSteamId: {}, locationsLength: {}.",
+              this,
+              endedStreamId,
+              currentLocationIndex.get(),
+              streamId,
+              locations.length);
+        } catch (Exception e) {
+          logger.warn("Failed to open stream and report to flink framework. ", e);
+          messageConsumer.accept(new TransportableError(0L, e));
+        }
+      } else {
+        CompletableFuture.runAsync(
+                () -> {
+                  try {
+                    openStreamInternal(requiredSegmentIdConsumer, false);
+                  } catch (IOException | InterruptedException e) {
+                    throw new RuntimeException(e);
+                  }
+                },
+                executorService)
+            .whenComplete(
+                (result, throwable) -> {
+                  if (throwable == null) {
+                    logger.debug(
+                        "MoveToNextPartitionIfPossible after openStream this: {},  endedStreamId: {}, currentLocationIndex: {}, currentSteamId: {}, locationsLength: {}.",
+                        this,
+                        endedStreamId,
+                        currentLocationIndex.get(),
+                        streamId,
+                        locations.length);
+                  } else {
+                    logger.warn("Failed to open stream and report to flink framework. ", throwable);
+                    messageConsumer.accept(new TransportableError(0L, throwable));
+                  }
+                });
       }
     }
   }
